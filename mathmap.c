@@ -8,9 +8,6 @@
  * Copyright (C) 2008 Serge van Thillo
  * nulleke@hotmail.com
  *
- * Copyright (C) 2010 Genadz Batsyan
- * gbatyan@gmail.com
- *
  * Plug-In structure based on:
  *   Whirl plug-in --- distort an image into a whirlpool
  *   Copyright (C) 1997 Federico Mena Quintero
@@ -64,8 +61,6 @@
 #endif
 #endif
 
-#include <couchdb-glib.h>
-
 #include "exprtree.h"
 #include "builtins/builtins.h"
 #include "tags.h"
@@ -78,10 +73,6 @@
 #include "mathmap.h"
 #include "expression_db.h"
 #include "designer/designer.h"
-
-#include "expression_panel.h"
-#include "communicator.h"
-#include "community_update.h"
 
 #define DEFAULT_PREVIEW_SIZE	384
 
@@ -97,7 +88,6 @@
 #endif
 
 #define EXPRESSIONS_DIR         "expressions"
-#define EXPRESSIONS_COMMUNITY_DIR "community"
 
 #define DEFAULT_EXPRESSION \
 "# Welcome to MathMap!\n" \
@@ -215,10 +205,10 @@ static void dialog_save_as_callback (GtkWidget *widget, gpointer data);
 static void dialog_ok_callback (GtkWidget *widget, gpointer data);
 static void dialog_help_callback (GtkWidget *widget, gpointer data);
 static void dialog_about_callback (GtkWidget *widget, gpointer data);
-static void dialog_tree_changed(GtkWidget *widget);
+static void dialog_tree_changed (GtkTreeSelection *tree, gpointer data);
 static void dialog_response (GtkWidget *widget, gint response_id, gpointer data);
 
-static void designer_tree_callback (GtkWidget *widget);
+static void designer_tree_callback (GtkTreeSelection *tree, gpointer data);
 static void design_save_callback (GtkWidget *widget, gpointer data);
 static void design_save_as_callback (GtkWidget *widget, gpointer data);
 
@@ -272,9 +262,9 @@ GtkWidget *mathmap_dialog_window,
     *edge_color_y_well,
     *uservalues_scrolled_window,
     *uservalues_table,
-    *filters_expression_panel = NULL,
-    *designer_expression_panel,
+    *tree_scrolled_window,
     *designer_widget,
+    *designer_tree_scrolled_window,
     *notebook;
 
 #ifdef THREADED_FINAL_RENDER
@@ -387,7 +377,7 @@ MAIN()
 
 /*****/
 
-char*
+static char*
 get_rc_file_name (char *name, int global)
 {
     gchar *mathmap_name = (name == 0) ? "mathmap" : g_strconcat("mathmap", G_DIR_SEPARATOR_S, name, NULL);
@@ -442,71 +432,59 @@ lookup_rc_file (char *name, gboolean report_error)
 
 /*****/
 
-static char *path_local = 0, *path_community, *path_global = 0;
-// copying global files to local community folder if community folder does not exist
-static void init_directories() {
-    struct stat st;
-
-    if (path_local)
-	return; // already initialized
-
-    path_local = get_rc_file_name(EXPRESSIONS_DIR, 0);
-    path_community = get_rc_file_name(EXPRESSIONS_COMMUNITY_DIR, 0);
-    path_global = get_rc_file_name(EXPRESSIONS_DIR, 1);
-
-    if (stat(path_community, &st)) {
-	expression_db_t *edb = NULL;
-	expression_db_t *expr;
-
-	if (mkdir(path_community, 0755)) {
-	    printf("Could not create directory %s\n", path_community);
-	    return;
-	}
-
-	// copying all global files to community folder
-	edb = extend_expression_db(edb, path_global, EXPRESSION_ORIGIN_COMMUNITY);
-	for (expr = edb; expr; expr = expr->next) {
-	    save_expression_to_dir(expr, path_community);
-	}
-	free_expression_db(edb);
-    }
-}
-
 static expression_db_t*
 read_expressions (void)
 {
-    expression_db_t *edb = 0;
+    static char *path_local = 0, *path_global = 0;
 
-    init_directories();
+    expression_db_t *edb_local, *edb_global;
 
-    edb = extend_expression_db(edb, path_local, EXPRESSION_ORIGIN_LOCAL);
-    edb = extend_expression_db(edb, path_community, EXPRESSION_ORIGIN_COMMUNITY);
+    if (path_local == 0)
+    {
+	path_local = get_rc_file_name(EXPRESSIONS_DIR, 0);
+	path_global = get_rc_file_name(EXPRESSIONS_DIR, 1);
+    }
 
-    return edb;
+    edb_local = read_expression_db(path_local);
+    edb_global = read_expression_db(path_global);
+
+    edb_global = merge_expression_dbs(edb_global, edb_local);
+
+    free_expression_db(edb_local);
+
+    return edb_global;
 }
 
 static void
 register_expression_db (expression_db_t *edb, char *symbol_prefix, char *menu_prefix)
 {
-    GList *tags_ptr;
-    GList *tags = get_tag_list_from_edb(edb);
+    int symbol_prefix_len = strlen(symbol_prefix);
+    int menu_prefix_len = strlen(menu_prefix);
 
-    for (tags_ptr = tags; tags_ptr; tags_ptr = g_list_next(tags_ptr)) {
-	expression_db_t	*expr;
-	char *tagged_menu_prefix = g_strdup_printf("%s/%s", menu_prefix, (char *)tags_ptr->data);
-	char *tag = (char *)tags_ptr->data;
+    for (; edb != 0; edb = edb->next)
+    {
+	char *symbol, *menu;
+	int i;
+	int name_len;
 
-	for (expr = edb; expr != 0; expr = expr->next)
+	name_len = strlen(edb->name);
+
+	symbol = g_malloc(symbol_prefix_len + name_len + 2);
+	sprintf(symbol, "%s_%s", symbol_prefix, edb->name);
+
+	menu = g_malloc(menu_prefix_len + name_len + 2);
+	sprintf(menu, "%s/%s", menu_prefix, edb->name);
+
+	for (i = symbol_prefix_len + 1; i < symbol_prefix_len + 1 + name_len; ++i)
+	    if (symbol[i] == ' ')
+		symbol[i] = '_';
+	    else
+		symbol[i] = tolower(symbol[i]);
+
+	if (edb->kind == EXPRESSION_DB_GROUP)
+	    register_expression_db(edb->v.group.subs, symbol, menu);
+	else
 	{
-	    char *menu, *symbol;
-
-	    if (! expression_has_tag(expr, tag))
-		continue;
-
-	    menu = g_strdup_printf("%s/%s", tagged_menu_prefix, expr->meta.title);
-
-	    symbol = get_expression_symbol(expr);
-
 	    static GimpParamDef args[] = {
 		{ GIMP_PDB_INT32,      "run_mode",         "Interactive, non-interactive" },
 		{ GIMP_PDB_IMAGE,      "image",            "Input image" },
@@ -525,28 +503,25 @@ gimp_plugin_menu_register (mathmap, "<Image>/Filters/Generic/");
 #endif
 
 	    gimp_install_procedure(symbol,
-				    "Generate an image using a mathematical expression.",
-				    "Generates an image by means of a mathematical expression. The expression "
-				    "can also refer to the data of an original image. Thus, arbitrary "
-				    "distortions can be constructed. Even animations can be generated.",
-				    "Mark Probst",
-				    "Mark Probst",
-				    MATHMAP_DATE ", " MATHMAP_VERSION,
-				    menu,
-				    "RGB*, GRAY*",
-				    GIMP_PLUGIN,
-				    nargs,
-				    nreturn_vals,
-				    args,
-				    return_vals);
-
-
-	    g_free(menu);
-	    g_free(symbol);
+				   "Generate an image using a mathematical expression.",
+				   "Generates an image by means of a mathematical expression. The expression "
+				   "can also refer to the data of an original image. Thus, arbitrary "
+				   "distortions can be constructed. Even animations can be generated.",
+				   "Mark Probst",
+				   "Mark Probst",
+				   MATHMAP_DATE ", " MATHMAP_VERSION,
+				   menu,
+				   "RGB*, GRAY*",
+				   GIMP_PLUGIN,
+				   nargs,
+				   nreturn_vals,
+				   args,
+				   return_vals);
 	}
-	g_free(tagged_menu_prefix);
+
+	g_free(menu);
+	g_free(symbol);
     }
-    deep_glist_free(tags);
 }
 
 static void
@@ -558,7 +533,6 @@ register_examples (void)
 	return;
 
     register_expression_db(edb, "mathmap", "<Image>/Filters/Generic/MathMap");
-
     free_expression_db(edb);
 }
 
@@ -567,23 +541,40 @@ expression_for_symbol (const char *symbol, expression_db_t *edb)
 {
     for (; edb != 0; edb = edb->next)
     {
-	char *expr_symbol = get_expression_symbol(edb);
-	int diff = strcmp(symbol, expr_symbol);
-	g_free(expr_symbol);
-	if (diff == 0)
-	    return read_expression(edb->v.expression.path);
+	int i;
+	int name_len;
+	int is_group = edb->kind == EXPRESSION_DB_GROUP;
+
+	name_len = strlen(edb->name);
+
+	if (name_len > strlen(symbol))
+	    continue;
+	if ((!is_group && name_len != strlen(symbol))
+	    || (is_group && name_len == strlen(symbol)))
+	    continue;
+	if (is_group && symbol[name_len] != '_')
+	    continue;
+
+	for (i = 0; i < name_len; ++i)
+	    if ((edb->name[i] == ' ' && symbol[i] != '_')
+		|| (edb->name[i] != ' ' && symbol[i] != tolower(edb->name[i])))
+		break;
+
+	if (i == name_len)
+	{
+	    if (is_group)
+	    {
+		char *exp = expression_for_symbol(symbol + name_len + 1, edb->v.group.subs);
+
+		if (exp != 0)
+		    return exp;
+	    }
+	    else
+		return read_expression(edb->v.expression.path);
+	}
     }
 
     return 0;
-}
-
-static void
-init_mathmap_engine ()
-{
-    init_builtins();
-    init_tags();
-    init_macros();
-    init_compiler();
 }
 
 static void
@@ -618,7 +609,6 @@ query(void)
 			   args,
 			   return_vals);
 
-    init_mathmap_engine();
     register_examples();
 }
 
@@ -635,13 +625,9 @@ run (const gchar *name, gint nparams, const GimpParam *param, gint *nreturn_vals
     GimpDrawable *gimp_drawable;
     int default_preview_width, default_preview_height;
 
-    init_mathmap_engine();
-
     if (strncmp(name, "mathmap_", 8) == 0)
     {
-	expression_db_t *edb = read_expressions();
-	char *exp = expression_for_symbol(name, edb);
-	free_expression_db(edb);
+	char *exp = expression_for_symbol(name + 8, read_expressions());
 
 	if (exp != 0)
 	{
@@ -687,6 +673,12 @@ run (const gchar *name, gint nparams, const GimpParam *param, gint *nreturn_vals
     output_bpp = drawable->v.gimp.bpp;
 
     gimp_drawable = get_gimp_input_drawable(drawable);
+
+    /* Init MathMap engine */
+    init_builtins();
+    init_tags();
+    init_macros();
+    init_compiler();
 
 #ifdef THREADED_FINAL_RENDER
     pthread_mutex_init(&get_gimp_pixel_mutex, NULL);
@@ -918,26 +910,26 @@ load_design (const char *filename)
 
 /*****/
 
-static gint32
+static gint32 
 mathmap_layer_copy(gint32 layerID)
 {
     GimpParam *return_vals;
     int nreturn_vals;
     gint32 nlayer;
 
-    return_vals = gimp_run_procedure ("gimp_layer_copy",
+    return_vals = gimp_run_procedure ("gimp_layer_copy", 
 				      &nreturn_vals,
 				      GIMP_PDB_LAYER, layerID,
 				      GIMP_PDB_INT32, TRUE,
 				      GIMP_PDB_END);
-
+ 
     if (return_vals[0].data.d_status == GIMP_PDB_SUCCESS)
 	nlayer = return_vals[1].data.d_layer;
     else
 	nlayer = -1;
     gimp_destroy_params(return_vals, nreturn_vals);
     return nlayer;
-}
+} 
 
 /*****/
 
@@ -1335,6 +1327,73 @@ drawable_get_pixel_inc (mathmap_invocation_t *invocation, input_drawable_t *draw
 
 /*****/
 
+#define TREE_VALUE_NAME			0
+#define TREE_VALUE_EDB			1
+
+static void
+tree_from_expression_db (GtkTreeStore *store, GtkTreeIter *parent, expression_db_t *edb)
+{
+    for (; edb != 0; edb = edb->next)
+    {
+	GtkTreeIter iter;
+
+	if (edb->kind == EXPRESSION_DB_GROUP)
+	{
+	    gtk_tree_store_append(store, &iter, parent);
+	    gtk_tree_store_set(store, &iter,
+			       TREE_VALUE_NAME, edb->name,
+			       -1);
+
+	    tree_from_expression_db(store, &iter, edb->v.group.subs);
+	}
+	else if (edb->kind == EXPRESSION_DB_EXPRESSION || edb->kind == EXPRESSION_DB_DESIGN)
+	{
+	    gtk_tree_store_append(store, &iter, parent);
+	    gtk_tree_store_set(store, &iter,
+			       TREE_VALUE_NAME, edb->name,
+			       TREE_VALUE_EDB, edb,
+			       -1);
+	}
+	else
+	    assert(0);
+    }
+}
+
+static GtkWidget*
+make_tree_from_edb (expression_db_t *edb, GCallback callback)
+{
+    GtkTreeStore *store;
+    GtkCellRenderer *renderer;
+    GtkTreeViewColumn *column;
+    GtkTreeSelection *selection;
+    GtkWidget *tree;
+
+    /* model */
+    store = gtk_tree_store_new(2, G_TYPE_STRING, G_TYPE_POINTER);
+
+    if (edb != 0)
+    	tree_from_expression_db(store, NULL, edb);
+
+    /* view */
+    tree = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
+    selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(tree));
+    gtk_tree_selection_set_mode(selection, GTK_SELECTION_SINGLE);
+    g_signal_connect(G_OBJECT(selection), "changed",
+		     G_CALLBACK(callback),
+		     (gpointer)NULL);
+
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes(_("Filters"), renderer,
+		    				      "text", 0,
+						      NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(tree), column);
+
+    gtk_widget_show(tree);
+
+    return tree;
+}
+
+/*****/
 
 static void
 update_userval_table (void)
@@ -1357,6 +1416,21 @@ update_userval_table (void)
     }
 }
 
+static void
+update_expression_tree_from_edb (GtkWidget *tree_scrolled_window, expression_db_t *edb, GCallback callback)
+{
+    GtkWidget *tree;
+
+    if (gtk_bin_get_child(GTK_BIN(tree_scrolled_window)) != 0)
+	gtk_container_remove(GTK_CONTAINER(tree_scrolled_window), gtk_bin_get_child(GTK_BIN(tree_scrolled_window)));
+
+    tree = make_tree_from_edb(edb, callback);
+
+    gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(tree_scrolled_window), tree);
+    gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(tree)), GTK_SELECTION_BROWSE);
+    gtk_widget_show(tree);
+}
+
 typedef struct
 {
     designer_node_t *node;
@@ -1364,15 +1438,13 @@ typedef struct
     double y;
 } node_and_position_t;
 
-void update_expression_tree (void)
+static void
+update_expression_tree (void)
 {
     designer_design_type_t *new_design_type;
     designer_design_t *new_design = NULL;
     int num_nodes = -1;
     node_and_position_t *positions = NULL;
-
-    if (! filters_expression_panel) // no tree
-	return;
 
     if (filters_edb != NULL)
 	free_expression_db(filters_edb);
@@ -1384,11 +1456,8 @@ void update_expression_tree (void)
     designer_edb = copy_expression_db(filters_edb);
     new_design_type = design_type_from_expression_db(&designer_edb);
 
-    expression_panel_set_edb(filters_expression_panel, filters_edb);
-    expression_panel_refresh(filters_expression_panel);
-
-    expression_panel_set_edb(designer_expression_panel, designer_edb);
-    expression_panel_refresh(designer_expression_panel);
+    update_expression_tree_from_edb(tree_scrolled_window, filters_edb, G_CALLBACK(dialog_tree_changed));
+    update_expression_tree_from_edb(designer_tree_scrolled_window, designer_edb, G_CALLBACK(designer_tree_callback));
 
     if (the_current_design != NULL)
     {
@@ -1455,7 +1524,6 @@ void update_expression_tree (void)
 /*****/
 
 #define RESPONSE_ABOUT 1
-#define RESPONSE_COMMUNITY_UPDATE 2
 
 static GtkWidget*
 make_edge_behaviour_frame (char *name, int direction_flag, GtkWidget **edge_color_well, GimpRGB *edge_color)
@@ -1518,6 +1586,19 @@ make_edge_behaviour_frame (char *name, int direction_flag, GtkWidget **edge_colo
     gtk_widget_show(toggle);
 
     return frame;
+}
+
+static GtkWidget*
+make_tree_scrolled_window (void)
+{
+    GtkWidget *tree_scrolled_window;
+
+    tree_scrolled_window = gtk_scrolled_window_new (NULL, NULL);
+    gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW(tree_scrolled_window),
+				    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_show (tree_scrolled_window);
+
+    return tree_scrolled_window;
 }
 
 static GtkWidget*
@@ -1638,7 +1719,6 @@ mathmap_dialog (int mutable_expression)
 					    gimp_standard_help_func, "plug-in-mathmap",
 					    GTK_STOCK_HELP, GTK_RESPONSE_HELP,
 					    _("About"), RESPONSE_ABOUT,
-					    _("Community Update"), RESPONSE_COMMUNITY_UPDATE,
 					    GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
 					    GTK_STOCK_OK, GTK_RESPONSE_OK,
 					    NULL);
@@ -1788,7 +1868,7 @@ mathmap_dialog (int mutable_expression)
             table = gtk_table_new(2, 1, FALSE);
 	    gtk_container_border_width(GTK_CONTAINER(table), 6);
 	    gtk_table_set_row_spacings(GTK_TABLE(table), 4);
-
+    
 	    frame = gtk_frame_new(NULL);
 	    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_ETCHED_IN);
 	    gtk_container_add(GTK_CONTAINER(frame), table);
@@ -1808,7 +1888,7 @@ mathmap_dialog (int mutable_expression)
 		gtk_widget_show(toggle);
 
 		/* Supersampling */
-
+	    
 		toggle = gtk_check_button_new_with_label(_("Supersampling"));
 		gtk_toggle_button_set_state(GTK_TOGGLE_BUTTON(toggle),
 					    mmvals.flags & FLAG_SUPERSAMPLING);
@@ -1822,7 +1902,7 @@ mathmap_dialog (int mutable_expression)
             table = gtk_table_new(2, 1, FALSE);
 	    gtk_container_border_width(GTK_CONTAINER(table), 6);
 	    gtk_table_set_row_spacings(GTK_TABLE(table), 4);
-
+    
 	    frame = gtk_frame_new(NULL);
 	    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_ETCHED_IN);
 	    gtk_container_add(GTK_CONTAINER(frame), table);
@@ -1864,7 +1944,7 @@ mathmap_dialog (int mutable_expression)
 	    gtk_table_set_row_spacings(GTK_TABLE(animation_table), 4);
 	    gtk_table_set_col_spacings(GTK_TABLE(animation_table), 4);
 	    gtk_widget_set_sensitive(GTK_WIDGET(animation_table), FALSE);
-
+    
 	    frame = gtk_frame_new(NULL);
 	    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_ETCHED_IN);
 	    gtk_container_add(GTK_CONTAINER(frame), animation_table);
@@ -1969,19 +2049,19 @@ mathmap_dialog (int mutable_expression)
 
 	/* Examples */
 
-	    filters_expression_panel = expression_panel_new(dialog_tree_changed);
+	    tree_scrolled_window = make_tree_scrolled_window();
 
 	    label = gtk_label_new(_("Filters"));
 	    gtk_widget_show(label);
-	    gtk_notebook_append_page_menu(GTK_NOTEBOOK(notebook), filters_expression_panel, label, label);
+	    gtk_notebook_append_page_menu(GTK_NOTEBOOK(notebook), tree_scrolled_window, label, label);
 
 	/* Designer */
 
 	    hpaned = gtk_hpaned_new();
 
-	    designer_expression_panel = expression_panel_new(designer_tree_callback);
-	    gtk_widget_set_size_request(designer_expression_panel, 250, 200);
-	    gtk_paned_add1(GTK_PANED(hpaned), designer_expression_panel);
+	    designer_tree_scrolled_window = make_tree_scrolled_window();
+	    gtk_widget_set_size_request(designer_tree_scrolled_window, 150, 200);
+	    gtk_paned_add1(GTK_PANED(hpaned), designer_tree_scrolled_window);
 
 	    designer_widget = designer_widget_new(NULL,
 						  design_changed_callback,
@@ -2812,14 +2892,14 @@ dialog_help_callback (GtkWidget *widget, gpointer data)
     GimpPDBProcType proc_type;
 
     if (gimp_procedural_db_proc_info("plug-in-web-browser",
-				     &proc_blurb, &proc_help,
+				     &proc_blurb, &proc_help, 
 				     &proc_author, &proc_copyright, &proc_date,
 				     &proc_type, &nparams, &nreturn_vals,
 				     &params, &return_vals))
 	gimp_run_procedure("plug-in-web-browser", &baz,
 			   GIMP_PDB_STRING, MATHMAP_MANUAL_URL,
 			   GIMP_PDB_END);
-    else
+    else 
     {
 	gchar *message = g_strdup_printf(_("See %s"), MATHMAP_MANUAL_URL);
 
@@ -2899,10 +2979,6 @@ dialog_response (GtkWidget *widget,
 	    dialog_about_callback(0, 0);
 	    break;
 
-	case RESPONSE_COMMUNITY_UPDATE :
-	    community_update(widget);
-	    break;
-
 	case GTK_RESPONSE_OK :
 	    dialog_ok_callback(0, widget);
 	    break;
@@ -2923,12 +2999,31 @@ dialog_response (GtkWidget *widget,
 
 /****/
 
-
 static void
-dialog_tree_changed (GtkWidget *widget)
+dialog_tree_changed (GtkTreeSelection *selection, gpointer data)
 {
-    expression_db_t *edb = expression_panel_get_selected_expression(widget);
-    if (edb) {
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+
+    if (ignore_dialog_tree_changes)
+    {
+	ignore_dialog_tree_changes = FALSE;
+	return;
+    }
+
+    if (selection == 0)
+	return;
+
+    if (gtk_tree_selection_get_selected(selection, &model, &iter))
+    {
+	GValue value = { 0, };
+	expression_db_t *edb;
+
+	gtk_tree_model_get_value(model, &iter, TREE_VALUE_EDB, &value);
+	edb = g_value_get_pointer(&value);
+	if (edb == NULL)
+	    return;
+
 	if (edb->kind == EXPRESSION_DB_EXPRESSION)
 	{
 	    char *path = edb->v.expression.path;
@@ -2967,17 +3062,36 @@ dialog_tree_changed (GtkWidget *widget)
 }
 
 static void
-designer_tree_callback (GtkWidget *widget)
+designer_tree_callback (GtkTreeSelection *selection, gpointer data)
 {
-    expression_db_t *edb = expression_panel_get_selected_expression(widget);
-    if (edb) {
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+
+    if (ignore_designer_tree_changes)
+    {
+	ignore_designer_tree_changes = FALSE;
+	return;
+    }
+
+    if (selection == 0)
+	return;
+
+    if (gtk_tree_selection_get_selected(selection, &model, &iter))
+    {
+	GValue value = { 0, };
 	const gchar *name;
 	designer_design_t *design = the_current_design;
 	designer_node_t *node;
 	designer_node_type_t *type;
 	int i;
+	expression_db_t *edb;
 
-	name = get_expression_name(edb);
+	gtk_tree_model_get_value(model, &iter, TREE_VALUE_EDB, &value);
+	edb = g_value_get_pointer(&value);
+	if (edb == NULL)
+	    return;
+
+	name = get_expression_name(edb, the_design_type);
 	if (name == NULL)
 	    return;
 
