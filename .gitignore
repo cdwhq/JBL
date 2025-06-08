@@ -1,19 +1,6 @@
-*.o
-*~
-*.orig
-*.swp
-builtins_doc.html
-compiler_types.h
-new_builtins.c
-opdefs.h
-parser.[ch]
-TAGS
-mathmap
-new_template.c
-opfuncs.h
-llvm-ops.h
-llvm_template.c
-backends/lazy_creator.cpp
-compopt/simplify_func.c
-examples/Test
+composer.phar
+/vendor/
 
+# Commit your application's lock file https://getcomposer.org/doc/01-basic-usage.md#commit-your-composer-lock-file-to-version-control
+# You may choose to ignore a library lock file http://getcomposer.org/doc/02-libraries.md#lock-file
+# composer.lock
